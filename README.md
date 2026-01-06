@@ -1,3 +1,11 @@
+--Run--
+Register Census key: census_api_key("YOUR_KEY", install=TRUE). Execute script. Wait for.png output. 
+Target: 269 districts. Ideal size: total_pop / 269. SF & Sacramento Cities: Fixed at 8. Others: round(pop / ideal). Start spatial merging.
+
+--Dependencies-- 
+R with packages: --sf, ggplot2, tigris (as a note, this will run pretty slow because of how large the map files are), tidycensus, dplyr, cowplot, classInt-- Also Census API key from https://api.census.gov/data/key_signup.html. You set the key at tidycensus::census_api_key("YOUR_KEY", install = TRUE).
+Before you run the algorithm it'll check that you have all the dependecies installed. If you're missing any, it'll install them automatically. Note that running this involves downloading large shapefiles and performing intensive spatial calculations, so it goes without saying that you should have a stable internet connection and sufficient RAM.
+
 --Personal Note-- 
 This is a repository for a script that runs a sample algorithm that districts for a nondescript 269-seat parliament in a fictional country that is roughly the shape of the general Northern California area.
 
@@ -10,16 +18,8 @@ The 1998 electoral reforms raised the number of seats to 450. The 1999 electoral
 As of 2030, there are 406 members of the Legislative Court elected to serve four-year terms:
 
 269 national territorial seats elected by first-past-the-post voting
-137 functional territorial seats elected by party-list proportional representation voting with seats apportioned using the greatest divisor method.
+137 functional territorial seats elected by party-list proportional representation voting with seats apportioned using the greatest divisor method. 
 
---Dependencies-- 
-R with packages: --sf, ggplot2, tigris (as a note, this will run pretty slow because of how large the map files are), tidycensus, dplyr, cowplot, classInt-- Also Census API key from https://api.census.gov/data/key_signup.html. You set the key at tidycensus::census_api_key("YOUR_KEY", install = TRUE).
-
---Summary-- 
-Before you run the algorithm it'll check that you have all the dependecies installed. If you're missing any, it'll install them automatically. Note that running this involves downloading large shapefiles and performing intensive spatial calculations, so it goes without saying that you should have a stable internet connection and sufficient RAM.
-
-Once it starts, the script will start fetching county boundaries, census tracts, and some specified city boundaries. Basically the total population of the 30-county region is divided into 269 target districts by dissolving adjacent census tracts into districts based on population size. I also set specific rules for San Francisco, San Diego, and San Jose. The former two are constrained to eight districts each, while San Jose and all other county remainders are allocated districts purely based on their population math. I also wrote some cat functions for tracking the run progress because I'm impatient.
-
---Contact-- 
+This script only accounts for the 269 national territorial seats, but future implementation and map interaction is considered.
 
 Email me: ctrieu0408@gmail.com
