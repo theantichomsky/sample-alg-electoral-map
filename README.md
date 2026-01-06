@@ -22,10 +22,15 @@ As of 2030, there are 406 members of the Legislative Court elected to serve four
 - 269 national territorial seats elected by first-past-the-post voting
 - 137 functional territorial seats elected by party-list proportional representation voting with seats apportioned using the greatest divisor method.
 
+--Dependencies--
+R with packages: --sf, ggplot2, tigris (as a note, this will run pretty slow because of how large the map files are), tidycensus, dplyr, cowplot, classInt-- Also Census API key from https://api.census.gov/data/key_signup.html. You set the key at tidycensus::census_api_key("YOUR_KEY", install = TRUE). 
+
 --Summary--
-The script does require a few dependencies. While I mainly began this with sf and ggplot2, I eventually added tigris, tidycensus, dplyr, cowplot, and classInt because I'm lazy. 
 Before you run the algorithm it'll check that you have all the dependecies installed. If you're missing any, it'll install them automatically. Note that
 running this involves downloading large shapefiles and performing intensive spatial calculations, so it goes without saying that you should have a stable internet connection and sufficient RAM.
 
 Once it starts, the script will start fetching county boundaries, census tracts, and some specified city boundaries. Basically the total population of the 30-county region is divided into 269 target districts by dissolving adjacent census tracts into districts based on population size. I also set specific rules for San Francisco, San Diego,
-and San Jose. The former two are constrained to eight districts each, while San Jose and all other county remainders are allocated districts purely based on their population math.
+and San Jose. The former two are constrained to eight districts each, while San Jose and all other county remainders are allocated districts purely based on their population math. I also wrote some cat functions for tracking the run progress because I'm impatient. 
+
+--Contact--
+Email me: ctrieu0408@gmail.com
