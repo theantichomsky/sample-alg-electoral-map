@@ -1,7 +1,7 @@
 --Personal Note-- This is a repository for a script that runs a sample algorithm that districts for a nondescript 269-seat parliament in a fictional country that is roughly
 the shape of the general Northern California area. 
 
-Let me say: I am by no means a seasoned developer. This is not very useful, nor did I make it with much reservations. I really should make it clear that I'm not trying to reflect
+Let me say: I am by no means a seasoned developer. This is not very useful, nor did I make it with much reservations. It is as long as it is because I kept adding more and more stupid things afterwards and only went back to debug when the script literally wouldn't run. I really also should make it clear that I'm not trying to reflect
 any genuine political convictions with this project. I find the electoral process to be one of the most magnificent, radical, terrifying, truely-byzantine political 
 formula for a mode of government. Having made physical maps myself for a long time, I started to play around with some packages while I was going over the most recent 
 census data for my home state of California. I encountered a lot of problems and learned a lot from debugging, and while this is the less-than-satisfying product of my 
