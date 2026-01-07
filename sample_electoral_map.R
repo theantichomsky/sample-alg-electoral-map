@@ -103,12 +103,19 @@ calculate_district_allocation <- function(tracts, target_districts) {
     st_drop_geometry() %>%
     group_by(COUNTY) %>%
     summarise(POPULATION = sum(POPULATION, na.rm = TRUE), N_TRACTS = n(), .groups = "drop") %>%
-    mutate(TARGET_DISTRICTS = round(POPULATION / ideal_pop_per_district))
+    mutate(TARGET_DISTRICTS = ifelse(is.finite(POPULATION / ideal_pop_per_district), 
+                                     round(POPULATION / ideal_pop_per_district), 0)) %>%
+    mutate(TARGET_DISTRICTS = ifelse(is.na(TARGET_DISTRICTS) | TARGET_DISTRICTS < 1, 1, TARGET_DISTRICTS))
   
   allocate_city_districts <- function(city_pop, city_target, county_pop, ideal_pop) {
+    if (is.na(city_pop) || is.na(county_pop) || is.na(ideal_pop) || ideal_pop <= 0) {
+      return(list(city = 0, rest = 0, total = 0))
+    }
     rest_pop <- county_pop - city_pop
-    rest_target <- if (rest_pop > 0) max(1, round(rest_pop / ideal_pop)) else 0
-    list(city = city_target, rest = rest_target, total = city_target + rest_target)
+    rest_target <- if (rest_pop > 0 && is.finite(ideal_pop)) max(1, round(rest_pop / ideal_pop)) else 0
+    total <- city_target + rest_target
+    if (is.na(total)) total <- 0
+    list(city = city_target, rest = rest_target, total = total)
   }
   
   sf_alloc <- allocate_city_districts(
@@ -158,13 +165,25 @@ calculate_district_allocation <- function(tracts, target_districts) {
 }
 
 district_within_county <- function(county_name, target_districts_county, all_tracts, ideal_pop, pre_filtered_tracts = NULL) {
+  if (is.na(target_districts_county) || target_districts_county <= 0) {
+    cat(sprintf("\nSkipping %s: invalid target districts (%s)\n", county_name, target_districts_county))
+    return(NULL)
+  }
+  
   cat(sprintf("\nDistricting %s (target: %d districts)...\n", county_name, target_districts_county))
   
   county_tracts <- if (!is.null(pre_filtered_tracts)) pre_filtered_tracts else all_tracts %>% filter(COUNTY == county_name)
   if (nrow(county_tracts) == 0) return(NULL)
   
   district_assignment <- 1:nrow(county_tracts)
-  ideal_pop_county <- sum(county_tracts$POPULATION, na.rm = TRUE) / target_districts_county
+  total_pop_county <- sum(county_tracts$POPULATION, na.rm = TRUE)
+  ideal_pop_county <- total_pop_county / target_districts_county
+  
+  if (is.na(ideal_pop_county) || !is.finite(ideal_pop_county) || ideal_pop_county <= 0) {
+    cat(sprintf("Skipping %s: invalid ideal population calculation\n", county_name))
+    return(NULL)
+  }
+  
   adjacency_sparse <- st_touches(county_tracts, sparse = TRUE)
   
   find_adjacent_districts <- function(dist_id, assignment) {
@@ -184,6 +203,11 @@ district_within_county <- function(county_name, target_districts_county, all_tra
   
   current_districts <- length(unique(district_assignment))
   iteration <- 0
+  
+  if (is.na(current_districts) || is.na(target_districts_county)) {
+    cat(sprintf("Skipping %s: invalid district count calculation\n", county_name))
+    return(NULL)
+  }
   
   while (current_districts > target_districts_county && iteration < 10000) {
     iteration <- iteration + 1
@@ -281,8 +305,11 @@ process_county_with_city <- function(county_name, tracts, allocations, all_tract
   county_tracts <- tracts %>% filter(COUNTY == county_name)
   
   if (!county_name %in% c("San Francisco", "Sacramento", "Santa Clara")) {
-    result <- district_within_county(county_name, allocations$stats$TARGET_DISTRICTS[allocations$stats$COUNTY == county_name], 
-                                     all_tracts, ideal_pop)
+    target_dist <- allocations$stats$TARGET_DISTRICTS[allocations$stats$COUNTY == county_name]
+    if (length(target_dist) == 0 || is.na(target_dist) || target_dist <= 0) {
+      return(list(result = NULL, counter = district_counter))
+    }
+    result <- district_within_county(county_name, target_dist, all_tracts, ideal_pop)
     if (!is.null(result)) {
       unique_districts <- unique(result$DISTRICT)
       for (dist_id in unique_districts) {
@@ -298,6 +325,11 @@ process_county_with_city <- function(county_name, tracts, allocations, all_tract
     else if (county_name == "Sacramento") allocations$sac
     else allocations$sj
   
+  if (is.null(alloc) || is.na(alloc$city) || is.na(alloc$rest)) {
+    cat(sprintf("Skipping %s: invalid allocation values\n", county_name))
+    return(list(result = NULL, counter = district_counter))
+  }
+  
   if (county_name == "San Francisco") {
     city_tracts <- county_tracts %>% filter(IN_SF_CITY == TRUE)
     rest_tracts <- county_tracts %>% filter(IN_SF_CITY == FALSE)
@@ -311,7 +343,7 @@ process_county_with_city <- function(county_name, tracts, allocations, all_tract
   
   results <- list()
   
-  if (nrow(city_tracts) > 0) {
+  if (nrow(city_tracts) > 0 && !is.na(alloc$city) && alloc$city > 0) {
     city_result <- district_within_county(
       paste(county_name, "City"), alloc$city, all_tracts, ideal_pop, pre_filtered_tracts = city_tracts
     )
@@ -325,7 +357,7 @@ process_county_with_city <- function(county_name, tracts, allocations, all_tract
     }
   }
   
-  if (nrow(rest_tracts) > 0 && alloc$rest > 0) {
+  if (nrow(rest_tracts) > 0 && !is.na(alloc$rest) && alloc$rest > 0) {
     rest_result <- district_within_county(
       paste(county_name, "County Rest"), alloc$rest, all_tracts, ideal_pop, pre_filtered_tracts = rest_tracts
     )
