@@ -322,8 +322,8 @@ process_county_with_city <- function(county_name, tracts, allocations, all_tract
   }
   
   alloc <- if (county_name == "San Francisco") allocations$sf
-    else if (county_name == "Sacramento") allocations$sac
-    else allocations$sj
+  else if (county_name == "Sacramento") allocations$sac
+  else allocations$sj
   
   if (is.null(alloc) || is.na(alloc$city) || is.na(alloc$rest)) {
     cat(sprintf("Skipping %s: invalid allocation values\n", county_name))
@@ -457,3 +457,4 @@ combined_map <- create_visualization(final_districts, spatial_data$counties, spa
 
 cat("\n=== MAP GENERATION COMPLETE ===\n")
 print(combined_map)
+
