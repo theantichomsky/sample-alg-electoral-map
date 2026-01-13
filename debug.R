@@ -1,3 +1,6 @@
+#run diagnoistcs with source("debug_map.R")
+#view missing coverage in red
+
 RUN_MAIN <- FALSE
 DEBUG_MAP <- TRUE
 
