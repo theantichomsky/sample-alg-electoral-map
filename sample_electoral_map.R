@@ -20,6 +20,12 @@ library(classInt)
 options(tigris_use_cache = TRUE)
 options(tigris_class = "sf")
 
+# Allow debug/driver scripts to control behavior without modifying this file.
+# - Set RUN_MAIN <- FALSE before sourcing this file to avoid auto-execution.
+# - Set DEBUG_MAP <- TRUE before sourcing to enable any optional debug hooks (none by default).
+if (!exists("RUN_MAIN")) RUN_MAIN <- TRUE
+if (!exists("DEBUG_MAP")) DEBUG_MAP <- FALSE
+
 target_counties <- c(
   "Alameda", "Contra Costa", "Marin", "Napa", "San Francisco", 
   "San Mateo", "Santa Clara", "Solano", "Sonoma",
@@ -31,15 +37,20 @@ target_counties <- c(
 )
 
 load_spatial_data <- function() {
-  ca_counties_boundaries <- counties(state = "CA", cb = TRUE, year = 2020) %>%
+  # Use full-resolution county boundaries for more reliable spatial joins
+  ca_counties_boundaries <- counties(state = "CA", cb = FALSE, year = 2020) %>%
     filter(NAME %in% target_counties) %>%
-    st_transform(crs = 3310)
+    st_transform(crs = 3310) %>%
+    st_make_valid()
   
   ca_tracts <- tracts(state = "CA", cb = FALSE, year = 2020) %>%
     st_transform(crs = 3310)
   
+  # IMPORTANT: avoid spatial filtering here (it can silently drop whole counties due to edge/validity issues).
+  # Tract shapes already include COUNTYFP, so filter deterministically by county FIPS.
+  target_countyfp <- unique(ca_counties_boundaries$COUNTYFP)
   samnam_tracts <- ca_tracts %>%
-    st_filter(ca_counties_boundaries, .predicate = st_intersects) %>%
+    filter(COUNTYFP %in% target_countyfp) %>%
     st_make_valid()
   
   tryCatch({
@@ -60,32 +71,52 @@ load_spatial_data <- function() {
     stop("Could not fetch population data. Please set your Census API key.")
   })
   
+  # Assign COUNTY name from COUNTYFP (no spatial join required)
   samnam_tracts <- samnam_tracts %>%
     filter(!is.na(POPULATION) & POPULATION > 0) %>%
-    st_transform(crs = 3310) %>%
-    st_join(
-      ca_counties_boundaries %>% select(NAME) %>% rename(COUNTY = NAME),
-      left = FALSE,
-      largest = TRUE
-    )
+    left_join(
+      ca_counties_boundaries %>%
+        st_drop_geometry() %>%
+        distinct(COUNTYFP, NAME) %>%
+        transmute(COUNTYFP, COUNTY = NAME),
+      by = "COUNTYFP"
+    ) %>%
+    filter(!is.na(COUNTY) & COUNTY %in% target_counties)
+
+  # Optional sanity check kept as a warning (use debug_map.R for full diagnostics)
+  key_counties <- c("San Francisco", "Santa Clara", "Sacramento")
+  missing_key <- setdiff(key_counties, unique(samnam_tracts$COUNTY))
+  if (length(missing_key) > 0) {
+    warning(sprintf(
+      "Some key counties are missing from tract data after county assignment: %s",
+      paste(missing_key, collapse = ", ")
+    ))
+  }
   
   ca_places <- places(state = "CA", cb = FALSE, year = 2020) %>%
     st_transform(crs = 3310)
   
-  sf_city_boundary <- ca_places %>% filter(NAME == "San Francisco")
-  sac_city_boundary <- ca_places %>% filter(NAME == "Sacramento")
-  sj_city_boundary <- ca_places %>% filter(grepl("^San Jose", NAME, ignore.case = TRUE))
+  sf_city_boundary <- ca_places %>% filter(NAME == "San Francisco") %>% st_make_valid()
+  sac_city_boundary <- ca_places %>% filter(NAME == "Sacramento") %>% st_make_valid()
+  sj_city_boundary <- ca_places %>% filter(grepl("^San Jose", NAME, ignore.case = TRUE)) %>% st_make_valid()
   
   if (nrow(sj_city_boundary) == 0) {
     sj_city_boundary <- ca_places %>%
-      filter(NAME == "San Jose" | NAME == "San José")
+      filter(NAME == "San Jose" | NAME == "San José") %>%
+      st_make_valid()
   }
+
+  # Union boundaries to single features so intersection logic is consistent
+  if (nrow(sf_city_boundary) > 0) sf_city_boundary <- st_union(sf_city_boundary) %>% st_as_sf() %>% st_make_valid()
+  if (nrow(sac_city_boundary) > 0) sac_city_boundary <- st_union(sac_city_boundary) %>% st_as_sf() %>% st_make_valid()
+  if (nrow(sj_city_boundary) > 0) sj_city_boundary <- st_union(sj_city_boundary) %>% st_as_sf() %>% st_make_valid()
   
   samnam_tracts <- samnam_tracts %>%
     mutate(
-      IN_SF_CITY = st_intersects(geometry, sf_city_boundary, sparse = FALSE)[,1],
-      IN_SAC_CITY = st_intersects(geometry, sac_city_boundary, sparse = FALSE)[,1],
-      IN_SJ_CITY = st_intersects(geometry, sj_city_boundary, sparse = FALSE)[,1]
+      # Use sparse intersections and lengths() so multi-part boundaries can't break via [,1]
+      IN_SF_CITY = lengths(st_intersects(geometry, sf_city_boundary)) > 0,
+      IN_SAC_CITY = lengths(st_intersects(geometry, sac_city_boundary)) > 0,
+      IN_SJ_CITY = lengths(st_intersects(geometry, sj_city_boundary)) > 0
     )
   
   list(
@@ -164,6 +195,16 @@ calculate_district_allocation <- function(tracts, target_districts) {
   )
 }
 
+relabel_district_ids <- function(district_sf, district_counter) {
+  old_ids <- sort(unique(district_sf$DISTRICT))
+  original_ids <- district_sf$DISTRICT
+  for (id in old_ids) {
+    district_sf$DISTRICT[original_ids == id] <- district_counter
+    district_counter <- district_counter + 1
+  }
+  list(result = district_sf, counter = district_counter)
+}
+
 district_within_county <- function(county_name, target_districts_county, all_tracts, ideal_pop, pre_filtered_tracts = NULL) {
   if (is.na(target_districts_county) || target_districts_county <= 0) {
     cat(sprintf("\nSkipping %s: invalid target districts (%s)\n", county_name, target_districts_county))
@@ -173,7 +214,9 @@ district_within_county <- function(county_name, target_districts_county, all_tra
   cat(sprintf("\nDistricting %s (target: %d districts)...\n", county_name, target_districts_county))
   
   county_tracts <- if (!is.null(pre_filtered_tracts)) pre_filtered_tracts else all_tracts %>% filter(COUNTY == county_name)
-  if (nrow(county_tracts) == 0) return(NULL)
+  if (nrow(county_tracts) == 0) {
+    return(NULL)
+  }
   
   district_assignment <- 1:nrow(county_tracts)
   total_pop_county <- sum(county_tracts$POPULATION, na.rm = TRUE)
@@ -311,19 +354,16 @@ process_county_with_city <- function(county_name, tracts, allocations, all_tract
     }
     result <- district_within_county(county_name, target_dist, all_tracts, ideal_pop)
     if (!is.null(result)) {
-      unique_districts <- unique(result$DISTRICT)
-      for (dist_id in unique_districts) {
-        result$DISTRICT[result$DISTRICT == dist_id] <- district_counter
-        district_counter <- district_counter + 1
-      }
-      return(list(result = result, counter = district_counter))
+      relabeled <- relabel_district_ids(result, district_counter)
+      return(list(result = relabeled$result, counter = relabeled$counter))
     }
     return(list(result = NULL, counter = district_counter))
   }
   
-  alloc <- if (county_name == "San Francisco") allocations$sf
-  else if (county_name == "Sacramento") allocations$sac
-  else allocations$sj
+  # NOTE: calculate_district_allocation() returns allocations under allocations$allocations
+  alloc <- if (county_name == "San Francisco") allocations$allocations$sf
+    else if (county_name == "Sacramento") allocations$allocations$sac
+    else allocations$allocations$sj
   
   if (is.null(alloc) || is.na(alloc$city) || is.na(alloc$rest)) {
     cat(sprintf("Skipping %s: invalid allocation values\n", county_name))
@@ -331,14 +371,14 @@ process_county_with_city <- function(county_name, tracts, allocations, all_tract
   }
   
   if (county_name == "San Francisco") {
-    city_tracts <- county_tracts %>% filter(IN_SF_CITY == TRUE)
-    rest_tracts <- county_tracts %>% filter(IN_SF_CITY == FALSE)
+    city_tracts <- county_tracts %>% filter(dplyr::coalesce(IN_SF_CITY, FALSE))
+    rest_tracts <- county_tracts %>% filter(!dplyr::coalesce(IN_SF_CITY, FALSE))
   } else if (county_name == "Sacramento") {
-    city_tracts <- county_tracts %>% filter(IN_SAC_CITY == TRUE)
-    rest_tracts <- county_tracts %>% filter(IN_SAC_CITY == FALSE)
+    city_tracts <- county_tracts %>% filter(dplyr::coalesce(IN_SAC_CITY, FALSE))
+    rest_tracts <- county_tracts %>% filter(!dplyr::coalesce(IN_SAC_CITY, FALSE))
   } else {
-    city_tracts <- county_tracts %>% filter(IN_SJ_CITY == TRUE)
-    rest_tracts <- county_tracts %>% filter(IN_SJ_CITY == FALSE)
+    city_tracts <- county_tracts %>% filter(dplyr::coalesce(IN_SJ_CITY, FALSE))
+    rest_tracts <- county_tracts %>% filter(!dplyr::coalesce(IN_SJ_CITY, FALSE))
   }
   
   results <- list()
@@ -348,12 +388,9 @@ process_county_with_city <- function(county_name, tracts, allocations, all_tract
       paste(county_name, "City"), alloc$city, all_tracts, ideal_pop, pre_filtered_tracts = city_tracts
     )
     if (!is.null(city_result)) {
-      unique_districts <- unique(city_result$DISTRICT)
-      for (dist_id in unique_districts) {
-        city_result$DISTRICT[city_result$DISTRICT == dist_id] <- district_counter
-        district_counter <- district_counter + 1
-      }
-      results[[length(results) + 1]] <- city_result
+      relabeled <- relabel_district_ids(city_result, district_counter)
+      district_counter <- relabeled$counter
+      results[[length(results) + 1]] <- relabeled$result
     }
   }
   
@@ -362,30 +399,45 @@ process_county_with_city <- function(county_name, tracts, allocations, all_tract
       paste(county_name, "County Rest"), alloc$rest, all_tracts, ideal_pop, pre_filtered_tracts = rest_tracts
     )
     if (!is.null(rest_result)) {
-      unique_districts <- unique(rest_result$DISTRICT)
-      for (dist_id in unique_districts) {
-        rest_result$DISTRICT[rest_result$DISTRICT == dist_id] <- district_counter
-        district_counter <- district_counter + 1
-      }
-      results[[length(results) + 1]] <- rest_result
+      relabeled <- relabel_district_ids(rest_result, district_counter)
+      district_counter <- relabeled$counter
+      results[[length(results) + 1]] <- relabeled$result
     }
   }
   
-  list(result = if (length(results) > 0) bind_rows(results) else NULL, counter = district_counter)
+  # Fallback: if city/rest split produced nothing (e.g., boundary intersection failed),
+  # district the whole county using the total allocation for that county.
+  if (length(results) == 0) {
+    target_total <- allocations$stats$TARGET_DISTRICTS[allocations$stats$COUNTY == county_name]
+    if (length(target_total) == 0 || is.na(target_total) || target_total <= 0) {
+      return(list(result = NULL, counter = district_counter))
+    }
+    fallback <- district_within_county(county_name, target_total, all_tracts, ideal_pop, pre_filtered_tracts = county_tracts)
+    if (!is.null(fallback)) {
+      relabeled <- relabel_district_ids(fallback, district_counter)
+      return(list(result = relabeled$result, counter = relabeled$counter))
+    }
+    return(list(result = NULL, counter = district_counter))
+  }
+
+  list(result = bind_rows(results), counter = district_counter)
 }
 
 create_visualization <- function(final_districts, counties, city_boundaries) {
   bbox <- st_bbox(final_districts)
   
-  sac_city_districts <- st_filter(final_districts, city_boundaries$sac, .predicate = st_intersects)
-  sj_city_districts <- st_filter(final_districts, city_boundaries$sj, .predicate = st_intersects)
-  other_districts <- final_districts %>%
-    filter(!DISTRICT_NUM %in% c(sac_city_districts$DISTRICT_NUM, sj_city_districts$DISTRICT_NUM))
-  
+  # cowplot versions differ: some don't support clip= in draw_plot()
+  draw_plot_safe <- function(plot, x, y, width, height) {
+    if ("clip" %in% names(formals(cowplot::draw_plot))) {
+      cowplot::draw_plot(plot, x = x, y = y, width = width, height = height, clip = "off")
+    } else {
+      cowplot::draw_plot(plot, x = x, y = y, width = width, height = height)
+    }
+  }
+
+  # Show ALL districts on the main map - don't filter out city districts
   main_map <- ggplot() +
-    geom_sf(data = sj_city_districts, fill = "#EFEFEF", color = "white", linewidth = 0.1) +
-    geom_sf(data = sac_city_districts, fill = "#EFEFEF", color = "white", linewidth = 0.1) +
-    geom_sf(data = other_districts, fill = "#EFEFEF", color = "white", linewidth = 0.1) +
+    geom_sf(data = final_districts, fill = "#EFEFEF", color = "white", linewidth = 0.1) +
     geom_sf(data = counties, fill = NA, color = "white", linewidth = 0.3) +
     theme_void() +
     theme(plot.background = element_rect(fill = "white", color = NA),
@@ -393,28 +445,41 @@ create_visualization <- function(final_districts, counties, city_boundaries) {
     coord_sf(expand = FALSE, xlim = c(bbox[["xmin"]], bbox[["xmax"]]), ylim = c(bbox[["ymin"]], bbox[["ymax"]]))
   
   create_inset <- function(city_boundary, city_name) {
-    city_bbox <- st_bbox(city_boundary)
+    # Union + validate so bbox/buffering is stable
+    city_boundary <- st_union(city_boundary) %>% st_make_valid()
+
     city_districts <- st_filter(final_districts, city_boundary, .predicate = st_intersects)
-    
+
+    # Buffer in projected meters (EPSG:3310) so the city outline / strokes never get clipped
+    buffered_bbox <- st_bbox(st_buffer(city_boundary, dist = 2000))
+
     ggplot() +
       geom_sf(data = city_districts, fill = "#EFEFEF", color = "white", linewidth = 0.15) +
       geom_sf(data = city_boundary, fill = NA, color = "white", linewidth = 0.4) +
-      coord_sf(xlim = c(city_bbox["xmin"], city_bbox["xmax"]),
-               ylim = c(city_bbox["ymin"], city_bbox["ymax"]), expand = FALSE) +
+      coord_sf(
+        xlim = c(buffered_bbox[["xmin"]], buffered_bbox[["xmax"]]),
+        ylim = c(buffered_bbox[["ymin"]], buffered_bbox[["ymax"]]),
+        expand = FALSE
+      ) +
       theme_void() +
-      theme(plot.background = element_rect(fill = "white", color = "white", linewidth = 0.5),
-            panel.background = element_rect(fill = "white", color = NA))
+      theme(
+        # Avoid drawing borders that can get clipped differently between devices
+        plot.background = element_rect(fill = "white", color = NA),
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.margin = margin(0, 0, 0, 0)
+      )
   }
   
   sf_inset <- create_inset(city_boundaries$sf, "San Francisco")
   sj_inset <- create_inset(city_boundaries$sj, "San Jose")
   sac_inset <- create_inset(city_boundaries$sac, "Sacramento")
   
+  # Place insets with a bit more breathing room from the canvas edge to avoid device clipping
   ggdraw() +
-    draw_plot(main_map, x = 0, y = 0, width = 1, height = 1) +
-    draw_plot(sf_inset, x = 0.02, y = 0.70, width = 0.22, height = 0.22) +
-    draw_plot(sj_inset, x = 0.02, y = 0.47, width = 0.22, height = 0.22) +
-    draw_plot(sac_inset, x = 0.02, y = 0.24, width = 0.22, height = 0.22)
+    draw_plot_safe(main_map, x = 0, y = 0, width = 1, height = 1) +
+    draw_plot_safe(sf_inset, x = 0.03, y = 0.70, width = 0.22, height = 0.22) +
+    draw_plot_safe(sj_inset, x = 0.03, y = 0.47, width = 0.22, height = 0.22) +
+    draw_plot_safe(sac_inset, x = 0.03, y = 0.24, width = 0.22, height = 0.22)
 }
 
 spatial_data <- load_spatial_data()
@@ -439,7 +504,11 @@ for (i in 1:nrow(allocations$stats)) {
 
 final_districts <- bind_rows(all_county_districts) %>%
   group_by(DISTRICT) %>%
-  summarise(POPULATION = sum(POPULATION, na.rm = TRUE), .groups = "drop") %>%
+  summarise(
+    POPULATION = sum(POPULATION, na.rm = TRUE),
+    COUNTY = dplyr::first(COUNTY),
+    .groups = "drop"
+  ) %>%
   mutate(DISTRICT_NUM = row_number()) %>%
   st_make_valid()
 
@@ -450,11 +519,12 @@ final_districts <- final_districts %>%
   st_make_valid() %>%
   filter(st_is_valid(geometry) & as.numeric(st_area(geometry)) > 0)
 
-cat(sprintf("\n=== DISTRICTING COMPLETE ===\n"))
-cat(sprintf("Final district count: %d (target: %d)\n", nrow(final_districts), target_districts))
+if (isTRUE(RUN_MAIN)) {
+  cat(sprintf("\n=== DISTRICTING COMPLETE ===\n"))
+  cat(sprintf("Final district count: %d (target: %d)\n", nrow(final_districts), target_districts))
 
-combined_map <- create_visualization(final_districts, spatial_data$counties, spatial_data$cities)
+  combined_map <- create_visualization(final_districts, spatial_data$counties, spatial_data$cities)
 
-cat("\n=== MAP GENERATION COMPLETE ===\n")
-print(combined_map)
-
+  cat("\n=== MAP GENERATION COMPLETE ===\n")
+  print(combined_map)
+}
