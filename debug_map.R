@@ -1,13 +1,3 @@
-## debug_map.R
-##
-## Diagnostics runner for sample_electoral_map.R
-## - Keeps sample_electoral_map.R clean
-## - Produces debug_coverage_gap.png showing missing coverage in red
-##
-## Usage (R console / RStudio):
-##   source("debug_map.R")
-##
-
 RUN_MAIN <- FALSE
 DEBUG_MAP <- TRUE
 
